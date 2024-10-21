@@ -6,15 +6,16 @@ import com.genymobile.scrcpy.device.DisplayInfo;
 import com.genymobile.scrcpy.device.Size;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.LogUtils;
+import com.genymobile.scrcpy.wrappers.DisplayManager;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 import com.genymobile.scrcpy.wrappers.SurfaceControl;
 
 import android.graphics.Rect;
 import android.hardware.display.VirtualDisplay;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
-import android.view.IDisplayFoldListener;
-import android.view.IRotationWatcher;
 import android.view.Surface;
 
 public class ScreenCapture extends SurfaceCapture {
@@ -31,8 +32,8 @@ public class ScreenCapture extends SurfaceCapture {
     private IBinder display;
     private VirtualDisplay virtualDisplay;
 
-    private IRotationWatcher rotationWatcher;
-    private IDisplayFoldListener displayFoldListener;
+    private DisplayManager.DisplayListenerHandle displayListenerHandle;
+    private HandlerThread handlerThread;
 
     public ScreenCapture(VirtualDisplayListener vdListener, int displayId, int maxSize, Rect crop, int lockVideoOrientation) {
         this.vdListener = vdListener;
@@ -44,30 +45,14 @@ public class ScreenCapture extends SurfaceCapture {
 
     @Override
     public void init() {
-        if (displayId == 0) {
-            rotationWatcher = new IRotationWatcher.Stub() {
-                @Override
-                public void onRotationChanged(int rotation) {
-                    requestReset();
-                }
-            };
-            ServiceManager.getWindowManager().registerRotationWatcher(rotationWatcher, displayId);
-        }
-
-        if (Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10) {
-            displayFoldListener = new IDisplayFoldListener.Stub() {
-                @Override
-                public void onDisplayFoldChanged(int displayId, boolean folded) {
-                    if (ScreenCapture.this.displayId != displayId) {
-                        // Ignore events related to other display ids
-                        return;
-                    }
-
-                    requestReset();
-                }
-            };
-            ServiceManager.getWindowManager().registerDisplayFoldListener(displayFoldListener);
-        }
+        handlerThread = new HandlerThread("DisplayListener");
+        handlerThread.start();
+        Handler handler = new Handler(handlerThread.getLooper());
+        displayListenerHandle = ServiceManager.getDisplayManager().registerDisplayListener(displayId -> {
+            if (this.displayId == displayId) {
+                requestReset();
+            }
+        }, handler);
     }
 
     @Override
@@ -137,12 +122,8 @@ public class ScreenCapture extends SurfaceCapture {
 
     @Override
     public void release() {
-        if (rotationWatcher != null) {
-            ServiceManager.getWindowManager().unregisterRotationWatcher(rotationWatcher);
-        }
-        if (Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10) {
-            ServiceManager.getWindowManager().unregisterDisplayFoldListener(displayFoldListener);
-        }
+        handlerThread.quitSafely();
+        ServiceManager.getDisplayManager().unregisterDisplayListener(displayListenerHandle);
         if (display != null) {
             SurfaceControl.destroyDisplay(display);
             display = null;
